@@ -9,6 +9,7 @@ import com.example.tetris.model.GameState
 import com.example.tetris.model.Piece
 import com.example.tetris.model.TetrominoType
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -66,7 +67,7 @@ class TetrisViewModel(application: Application) : AndroidViewModel(application) 
     private fun startGameLoop() {
         gameJob?.cancel()
         gameJob = viewModelScope.launch {
-            while (true) {
+            while (isActive) {
                 delay(getTickDelay())
                 if (_uiState.value.gameState == GameState.Playing) {
                     tick()
@@ -76,8 +77,8 @@ class TetrisViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     private fun getTickDelay(): Long {
-        val level = _uiState.value.score / 500
-        return (800L - (level * 80L)).coerceAtLeast(100L)
+        val level = (_uiState.value.linesCleared / 10) + 1
+        return maxOf(100L, 1000L - (level - 1) * 100L)
     }
 
     private fun tick() {
@@ -177,7 +178,8 @@ class TetrisViewModel(application: Application) : AndroidViewModel(application) 
         val current = _uiState.value.currentPiece ?: return
         val nextPos = current.copy(y = current.y + 1)
         if (!_uiState.value.board.hasCollision(nextPos)) {
-            _uiState.update { it.copy(currentPiece = nextPos) }
+            // Soft drop: +1 очко за каждую клетку
+            _uiState.update { it.copy(currentPiece = nextPos, score = it.score + 1) }
         } else {
             lockPiece()
         }
@@ -186,15 +188,18 @@ class TetrisViewModel(application: Application) : AndroidViewModel(application) 
     fun hardDrop() {
         if (_uiState.value.gameState != GameState.Playing) return
         var current = _uiState.value.currentPiece ?: return
+        var cellsDropped = 0
         while (true) {
             val nextPos = current.copy(y = current.y + 1)
             if (!_uiState.value.board.hasCollision(nextPos)) {
                 current = nextPos
+                cellsDropped++
             } else {
                 break
             }
         }
-        _uiState.update { it.copy(currentPiece = current) }
+        // Hard drop: +2 очка за каждую клетку
+        _uiState.update { it.copy(currentPiece = current, score = it.score + cellsDropped * 2) }
         lockPiece()
     }
 
