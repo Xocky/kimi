@@ -4,12 +4,13 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.focusable
+import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
@@ -19,24 +20,31 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.DrawScope
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.key.*
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.tetris.model.Board
 import com.example.tetris.model.GameState
 import com.example.tetris.model.TetrominoType
 import com.example.tetris.viewmodel.TetrisViewModel
+import kotlin.math.abs
+
+// Минимальное расстояние (px) для срабатывания свайпа
+private const val SWIPE_THRESHOLD = 30f
 
 @Composable
 fun TetrisGameScreen(viewModel: TetrisViewModel) {
-    val uiState by viewModel.uiState.collectAsState()
+    // Баг 1: collectAsStateWithLifecycle — не жрёт батарею в фоне
+    val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val focusRequester = remember { FocusRequester() }
 
-    // Запрашиваем фокус для обработки клавиш
     LaunchedEffect(uiState.gameState) {
         if (uiState.gameState == GameState.Playing) {
             focusRequester.requestFocus()
@@ -75,7 +83,6 @@ fun TetrisGameScreen(viewModel: TetrisViewModel) {
             modifier = Modifier.fillMaxSize(),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            // Верхняя панель заголовка
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -100,20 +107,42 @@ fun TetrisGameScreen(viewModel: TetrisViewModel) {
                 }
             }
 
-            // Основная игровая зона (Поле + Статистика)
             Row(
                 modifier = Modifier
                     .weight(1f)
                     .fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(16.dp)
             ) {
-                // Игровое поле (левая колонка, занимает больше места)
+                // Игровое поле с жестами (Баг 3)
                 Box(
                     modifier = Modifier
                         .weight(1.8f)
                         .fillMaxHeight()
                         .border(2.dp, Color(0xFF333333), RoundedCornerShape(8.dp))
-                        .background(Color(0xFF1E1E1E), RoundedCornerShape(8.dp)),
+                        .background(Color(0xFF1E1E1E), RoundedCornerShape(8.dp))
+                        // Баг 3: swipe-жесты — влево/вправо = move, вниз = soft drop
+                        .pointerInput(Unit) {
+                            detectDragGestures { _, dragAmount ->
+                                if (uiState.gameState != GameState.Playing) return@detectDragGestures
+                                val (dx, dy) = dragAmount
+                                when {
+                                    abs(dx) > abs(dy) && dx < -SWIPE_THRESHOLD -> viewModel.moveLeft()
+                                    abs(dx) > abs(dy) && dx > SWIPE_THRESHOLD  -> viewModel.moveRight()
+                                    abs(dy) > abs(dx) && dy > SWIPE_THRESHOLD  -> viewModel.moveDown()
+                                }
+                            }
+                        }
+                        // Баг 3: tap = rotate, double tap = hard drop
+                        .pointerInput(Unit) {
+                            detectTapGestures(
+                                onTap = {
+                                    if (uiState.gameState == GameState.Playing) viewModel.rotate()
+                                },
+                                onDoubleTap = {
+                                    if (uiState.gameState == GameState.Playing) viewModel.hardDrop()
+                                }
+                            )
+                        },
                     contentAlignment = Alignment.Center
                 ) {
                     Canvas(
@@ -124,12 +153,15 @@ fun TetrisGameScreen(viewModel: TetrisViewModel) {
                         val width = Board.WIDTH
                         val height = Board.HEIGHT
                         val blockSize = minOf(size.width / width, size.height / height)
-                        
-                        // Смещения для центрирования сетки
                         val offsetX = (size.width - width * blockSize) / 2
                         val offsetY = (size.height - height * blockSize) / 2
 
-                        // Рисуем сетку
+                        // Баг 2: вычисляем один раз за кадр, не в каждом drawBlock()
+                        val cornerRadiusBlock = CornerRadius(4.dp.toPx(), 4.dp.toPx())
+                        val cornerRadiusHighlight = CornerRadius(2.dp.toPx(), 2.dp.toPx())
+                        val blockStroke = Stroke(width = 1.5f)
+
+                        // Сетка
                         for (r in 0 until height) {
                             for (c in 0 until width) {
                                 drawRect(
@@ -140,17 +172,20 @@ fun TetrisGameScreen(viewModel: TetrisViewModel) {
                             }
                         }
 
-                        // Рисуем зафиксированные ячейки
+                        // Зафиксированные блоки
                         for (r in 0 until height) {
                             for (c in 0 until width) {
                                 val colorVal = uiState.board.grid[r][c]
                                 if (colorVal != 0L) {
-                                    drawBlock(c, r, Color(colorVal), blockSize, offsetX, offsetY)
+                                    drawBlock(
+                                        c, r, Color(colorVal), blockSize, offsetX, offsetY,
+                                        cornerRadiusBlock, cornerRadiusHighlight, blockStroke
+                                    )
                                 }
                             }
                         }
 
-                        // Рисуем активную падающую фигуру
+                        // Активная фигура
                         uiState.currentPiece?.let { piece ->
                             val shape = piece.type.getShape(piece.rotation)
                             for (r in shape.indices) {
@@ -159,7 +194,11 @@ fun TetrisGameScreen(viewModel: TetrisViewModel) {
                                         val boardX = piece.x + c
                                         val boardY = piece.y + r
                                         if (boardY in 0 until height && boardX in 0 until width) {
-                                            drawBlock(boardX, boardY, Color(piece.type.color), blockSize, offsetX, offsetY)
+                                            drawBlock(
+                                                boardX, boardY, Color(piece.type.color),
+                                                blockSize, offsetX, offsetY,
+                                                cornerRadiusBlock, cornerRadiusHighlight, blockStroke
+                                            )
                                         }
                                     }
                                 }
@@ -168,14 +207,12 @@ fun TetrisGameScreen(viewModel: TetrisViewModel) {
                     }
                 }
 
-                // Боковая панель (правая колонка: Следующая фигура + Статы)
                 Column(
                     modifier = Modifier
                         .weight(1f)
                         .fillMaxHeight(),
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    // Блок "Next"
                     Column(
                         horizontalAlignment = Alignment.CenterHorizontally,
                         modifier = Modifier
@@ -194,27 +231,20 @@ fun TetrisGameScreen(viewModel: TetrisViewModel) {
                         NextPiecePreview(type = uiState.nextPieceType)
                     }
 
-                    // Блок "Score"
                     StatBox(label = "SCORE", value = "${uiState.score}")
-
-                    // Блок "Lines"
                     StatBox(label = "LINES", value = "${uiState.linesCleared}")
-
-                    // Блок "High Score"
                     StatBox(label = "RECORD", value = "${uiState.highScore}", highlight = true)
                 }
             }
 
             Spacer(modifier = Modifier.height(16.dp))
 
-            // Сенсорные элементы управления на экране
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(bottom = 8.dp),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                // Первый ряд: Влево, Поворот, Вправо
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceEvenly,
@@ -231,7 +261,6 @@ fun TetrisGameScreen(viewModel: TetrisViewModel) {
 
                 Spacer(modifier = Modifier.height(10.dp))
 
-                // Второй ряд: Вниз (Мягкое падение) и Падение (Hard Drop)
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(16.dp)
@@ -261,7 +290,6 @@ fun TetrisGameScreen(viewModel: TetrisViewModel) {
             }
         }
 
-        // Оверлей для Главного меню
         if (uiState.gameState is GameState.Menu) {
             OverlayContainer {
                 Text(
@@ -299,7 +327,6 @@ fun TetrisGameScreen(viewModel: TetrisViewModel) {
             }
         }
 
-        // Оверлей паузы
         if (uiState.gameState is GameState.Paused) {
             OverlayContainer {
                 Text(
@@ -333,7 +360,6 @@ fun TetrisGameScreen(viewModel: TetrisViewModel) {
             }
         }
 
-        // Оверлей Game Over
         if (uiState.gameState is GameState.GameOver) {
             val gameOverState = uiState.gameState as GameState.GameOver
             OverlayContainer {
@@ -386,34 +412,41 @@ fun TetrisGameScreen(viewModel: TetrisViewModel) {
     }
 }
 
-private fun DrawScope.drawBlock(x: Int, y: Int, color: Color, blockSize: Float, offsetX: Float, offsetY: Float) {
+// Баг 2: CornerRadius и Stroke передаются снаружи — созданы один раз за кадр
+private fun DrawScope.drawBlock(
+    x: Int, y: Int,
+    color: Color,
+    blockSize: Float,
+    offsetX: Float,
+    offsetY: Float,
+    cornerRadiusBlock: CornerRadius,
+    cornerRadiusHighlight: CornerRadius,
+    blockStroke: Stroke
+) {
     val left = offsetX + x * blockSize
     val top = offsetY + y * blockSize
     val pad = 1f
 
-    // Основная закраска блока
     drawRoundRect(
         color = color,
         topLeft = Offset(left + pad, top + pad),
         size = Size(blockSize - 2 * pad, blockSize - 2 * pad),
-        cornerRadius = CornerRadius(4.dp.toPx(), 4.dp.toPx())
+        cornerRadius = cornerRadiusBlock
     )
 
-    // Светлый блик сверху для объема (3D-эффект)
     drawRoundRect(
         color = Color.White.copy(alpha = 0.25f),
         topLeft = Offset(left + pad + 2f, top + pad + 2f),
         size = Size(blockSize - 2 * pad - 4f, (blockSize - 2 * pad) / 3f),
-        cornerRadius = CornerRadius(2.dp.toPx(), 2.dp.toPx())
+        cornerRadius = cornerRadiusHighlight
     )
 
-    // Тёмный контур
     drawRoundRect(
         color = Color.Black.copy(alpha = 0.3f),
         topLeft = Offset(left + pad, top + pad),
         size = Size(blockSize - 2 * pad, blockSize - 2 * pad),
-        cornerRadius = CornerRadius(4.dp.toPx(), 4.dp.toPx()),
-        style = androidx.compose.ui.graphics.drawscope.Stroke(width = 1.5f)
+        cornerRadius = cornerRadiusBlock,
+        style = blockStroke
     )
 }
 
@@ -431,6 +464,8 @@ fun NextPiecePreview(type: TetrominoType) {
             val blockSize = size.width / cellCount
             val offsetX = (size.width - shape[0].size * blockSize) / 2
             val offsetY = (size.height - shape.size * blockSize) / 2
+            val cornerRadius = CornerRadius(3.dp.toPx(), 3.dp.toPx())
+            val highlightCorner = CornerRadius(1.dp.toPx(), 1.dp.toPx())
 
             for (r in shape.indices) {
                 for (c in shape[r].indices) {
@@ -439,14 +474,13 @@ fun NextPiecePreview(type: TetrominoType) {
                             color = Color(type.color),
                             topLeft = Offset(offsetX + c * blockSize + 1f, offsetY + r * blockSize + 1f),
                             size = Size(blockSize - 2f, blockSize - 2f),
-                            cornerRadius = CornerRadius(3.dp.toPx(), 3.dp.toPx())
+                            cornerRadius = cornerRadius
                         )
-                        // Блик
                         drawRoundRect(
                             color = Color.White.copy(alpha = 0.25f),
                             topLeft = Offset(offsetX + c * blockSize + 2.5f, offsetY + r * blockSize + 2.5f),
                             size = Size(blockSize - 5f, blockSize / 3f),
-                            cornerRadius = CornerRadius(1.dp.toPx(), 1.dp.toPx())
+                            cornerRadius = highlightCorner
                         )
                     }
                 }
